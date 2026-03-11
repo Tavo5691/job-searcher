@@ -18,9 +18,14 @@ import (
 type view int
 
 const (
-	huntList   view = iota // 0 — list of hunts
-	huntInput              // 1 — text input to create a new hunt
-	huntDetail             // 2 — detail view of a single hunt
+	huntList        view = iota // 0 — list of hunts
+	huntInput                   // 1 — text input to create a new hunt
+	huntDetail                  // 2 — detail view of a single hunt
+	appList                     // 3 — application list for the current hunt
+	appInputCompany             // 4 — text input: company name
+	appInputRole                // 5 — text input: role/title
+	appInputJobDesc             // 6 — text input: job description
+	appDetail                   // 7 — detail view for a single application
 )
 
 // serviceIface is the minimal subset of app.Service that the TUI requires.
@@ -31,6 +36,8 @@ type serviceIface interface {
 	GetHunt(ctx context.Context, id string) (domain.Hunt, error)
 	CloseHunt(ctx context.Context, id string) (domain.Hunt, error)
 	ListApplications(ctx context.Context, huntID string) ([]domain.Application, error)
+	CreateApplication(ctx context.Context, huntID, company, role, jobDesc string) (domain.Application, error)
+	UpdateApplication(ctx context.Context, app domain.Application) (domain.Application, error)
 }
 
 // App is the root Bubble Tea model for the job-searcher TUI.
@@ -43,6 +50,13 @@ type App struct {
 	input       textinput.Model
 	counts      map[string]int
 	statusMsg   string
+	// Application flow fields.
+	currentHunt domain.Hunt
+	apps        []domain.Application
+	appCursor   int
+	inputStep   int
+	draft       domain.Application
+	currentApp  domain.Application
 }
 
 // NewApp creates a new App with the given service.
@@ -82,6 +96,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateHuntInput(m)
 		case huntDetail:
 			return a.updateHuntDetail(m)
+		case appList:
+			return a.updateAppList(m)
+		case appInputCompany:
+			return a.updateAppInputCompany(m)
+		case appInputRole:
+			return a.updateAppInputRole(m)
+		case appInputJobDesc:
+			return a.updateAppInputJobDesc(m)
+		case appDetail:
+			return a.updateAppDetail(m)
 		}
 	case huntsLoadedMsg:
 		a.hunts = m.hunts
@@ -100,6 +124,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			return a, loadHuntsAndCountsCmd(a.svc)
 		}
+	case applicationsLoadedMsg:
+		a.apps = m.apps
+		a.appCursor = 0
+	case applicationCreatedMsg:
+		a.apps = append(a.apps, m.app)
+		a.draft = domain.Application{}
+		a.inputStep = 0
+	case applicationUpdatedMsg:
+		// Refresh the apps list with the updated application.
+		for i, ap := range a.apps {
+			if ap.ID == m.app.ID {
+				a.apps[i] = m.app
+				break
+			}
+		}
+		// Update currentApp if it matches the updated application.
+		if a.currentApp.ID == m.app.ID {
+			a.currentApp = m.app
+		}
+	case statusMsg:
+		a.statusMsg = string(m)
 	}
 	return a, nil
 }
@@ -160,9 +205,148 @@ func (a *App) updateHuntInput(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// updateAppList handles key messages in the application list view.
+func (a *App) updateAppList(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.currentView = huntDetail
+		return a, nil
+	case tea.KeyEnter:
+		if len(a.apps) > 0 && a.appCursor < len(a.apps) {
+			a.currentApp = a.apps[a.appCursor]
+			a.currentView = appDetail
+		}
+		return a, nil
+	}
+	switch m.String() {
+	case "n":
+		a.draft = domain.Application{}
+		a.inputStep = 0
+		a.input.Reset()
+		a.input.Focus()
+		a.currentView = appInputCompany
+		return a, textinput.Blink
+	case "j", "down":
+		if a.appCursor < len(a.apps)-1 {
+			a.appCursor++
+		}
+	case "k", "up":
+		if a.appCursor > 0 {
+			a.appCursor--
+		}
+	}
+	return a, nil
+}
+
+// updateAppInputCompany handles key messages in the company name input view.
+func (a *App) updateAppInputCompany(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEnter:
+		a.draft.CompanyName = a.input.Value()
+		a.input.Reset()
+		a.inputStep = 1
+		a.currentView = appInputRole
+		return a, nil
+	case tea.KeyEsc:
+		a.draft = domain.Application{}
+		a.inputStep = 0
+		a.input.Reset()
+		a.currentView = appList
+		return a, nil
+	default:
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(m)
+		return a, cmd
+	}
+}
+
+// updateAppInputRole handles key messages in the role title input view.
+func (a *App) updateAppInputRole(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEnter:
+		a.draft.RoleTitle = a.input.Value()
+		a.input.Reset()
+		a.inputStep = 2
+		a.currentView = appInputJobDesc
+		return a, nil
+	case tea.KeyEsc:
+		a.draft = domain.Application{}
+		a.inputStep = 0
+		a.input.Reset()
+		a.currentView = appList
+		return a, nil
+	default:
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(m)
+		return a, cmd
+	}
+}
+
+// updateAppInputJobDesc handles key messages in the job description input view.
+func (a *App) updateAppInputJobDesc(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEnter:
+		jobDesc := a.input.Value()
+		a.input.Reset()
+		a.currentView = appList
+		return a, createApplicationCmd(a.svc, a.currentHunt.ID, a.draft.CompanyName, a.draft.RoleTitle, jobDesc)
+	case tea.KeyEsc:
+		a.draft = domain.Application{}
+		a.inputStep = 0
+		a.input.Reset()
+		a.currentView = appList
+		return a, nil
+	default:
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(m)
+		return a, cmd
+	}
+}
+
+// updateAppDetail handles key messages in the application detail view.
+func (a *App) updateAppDetail(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.currentView = appList
+		return a, nil
+	}
+	switch m.String() {
+	case "s":
+		a.currentApp.Status = nextStatus(a.currentApp.Status)
+		return a, updateApplicationCmd(a.svc, a.currentApp)
+	}
+	return a, nil
+}
+
+// nextStatus cycles the application status in the canonical order:
+// applied → interviewing → offer → accepted → rejected → withdrawn → applied
+func nextStatus(s domain.ApplicationStatus) domain.ApplicationStatus {
+	cycle := []domain.ApplicationStatus{
+		domain.ApplicationStatusApplied,
+		domain.ApplicationStatusInterviewing,
+		domain.ApplicationStatusOffer,
+		domain.ApplicationStatusAccepted,
+		domain.ApplicationStatusRejected,
+		domain.ApplicationStatusWithdrawn,
+	}
+	for i, status := range cycle {
+		if status == s {
+			return cycle[(i+1)%len(cycle)]
+		}
+	}
+	// Unknown status — default to applied.
+	return domain.ApplicationStatusApplied
+}
+
 // updateHuntDetail handles key messages in the hunt detail view.
 func (a *App) updateHuntDetail(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.Type {
+	case tea.KeyEnter:
+		if len(a.hunts) > 0 && a.cursor < len(a.hunts) {
+			a.currentHunt = a.hunts[a.cursor]
+			a.currentView = appList
+			return a, loadApplicationsCmd(a.svc, a.currentHunt.ID)
+		}
 	case tea.KeyEsc:
 		a.currentView = huntList
 	}
@@ -176,9 +360,53 @@ func (a *App) View() string {
 		return a.viewHuntInput()
 	case huntDetail:
 		return a.viewHuntDetail()
+	case appList:
+		return a.viewAppList()
+	case appInputCompany:
+		return a.viewAppInput("Company name")
+	case appInputRole:
+		return a.viewAppInput("Role / job title")
+	case appInputJobDesc:
+		return a.viewAppInput("Job description")
+	case appDetail:
+		return a.viewAppDetail()
 	default:
 		return a.viewHuntList()
 	}
+}
+
+// viewAppList renders the application list screen for the current hunt.
+func (a *App) viewAppList() string {
+	title := lipgloss.NewStyle().Bold(true).Render(a.currentHunt.Title + " — Applications")
+	if len(a.apps) == 0 {
+		return title + "\n\nNo applications yet. Press 'n' to create one.\n\nEsc to go back • n to create"
+	}
+	var rows string
+	for i, ap := range a.apps {
+		cursor := "  "
+		if i == a.appCursor {
+			cursor = "> "
+		}
+		rows += fmt.Sprintf("%s%s — %s [%s]\n", cursor, ap.CompanyName, ap.RoleTitle, ap.Status)
+	}
+	return title + "\n\n" + rows + "\nj/k to move • Enter to open • n to create • Esc to go back"
+}
+
+// viewAppInput renders a single-line text input screen with the given prompt label.
+func (a *App) viewAppInput(prompt string) string {
+	title := lipgloss.NewStyle().Bold(true).Render("New Application — " + prompt)
+	return title + "\n\n" + a.input.View() + "\n\nEnter to continue • Esc to cancel"
+}
+
+// viewAppDetail renders the application detail screen.
+func (a *App) viewAppDetail() string {
+	ap := a.currentApp
+	title := lipgloss.NewStyle().Bold(true).Render("Application: " + ap.CompanyName + " \u2014 " + ap.RoleTitle)
+	desc := ap.JobDescription
+	if len(desc) > 200 {
+		desc = desc[:200] + "..."
+	}
+	return fmt.Sprintf("%s\n\nStatus: %s\n\n%s\n\n[s] cycle status  [Esc] back", title, ap.Status, desc)
 }
 
 // viewHuntList renders the hunt list screen.
@@ -228,6 +456,51 @@ func (a *App) viewHuntDetail() string {
 	}
 	title := lipgloss.NewStyle().Bold(true).Render(h.Title)
 	return fmt.Sprintf("%s\n\nStatus: %s\nApplications: %d\n\nEsc to go back", title, h.Status, n)
+}
+
+// statusMsg is a tea.Msg that carries an error or status string for display.
+type statusMsg string
+
+// applicationsLoadedMsg carries the result of loading applications for a hunt.
+type applicationsLoadedMsg struct{ apps []domain.Application }
+
+// applicationCreatedMsg carries the result of creating an application.
+type applicationCreatedMsg struct{ app domain.Application }
+
+// applicationUpdatedMsg carries the result of updating an application.
+type applicationUpdatedMsg struct{ app domain.Application }
+
+// loadApplicationsCmd returns a Bubble Tea command that loads applications for a hunt.
+func loadApplicationsCmd(svc serviceIface, huntID string) tea.Cmd {
+	return func() tea.Msg {
+		apps, err := svc.ListApplications(context.Background(), huntID)
+		if err != nil {
+			return statusMsg(err.Error())
+		}
+		return applicationsLoadedMsg{apps: apps}
+	}
+}
+
+// createApplicationCmd returns a Bubble Tea command that creates an application.
+func createApplicationCmd(svc serviceIface, huntID, company, role, jobDesc string) tea.Cmd {
+	return func() tea.Msg {
+		app, err := svc.CreateApplication(context.Background(), huntID, company, role, jobDesc)
+		if err != nil {
+			return statusMsg(err.Error())
+		}
+		return applicationCreatedMsg{app: app}
+	}
+}
+
+// updateApplicationCmd returns a Bubble Tea command that updates an application.
+func updateApplicationCmd(svc serviceIface, app domain.Application) tea.Cmd {
+	return func() tea.Msg {
+		updated, err := svc.UpdateApplication(context.Background(), app)
+		if err != nil {
+			return statusMsg(err.Error())
+		}
+		return applicationUpdatedMsg{app: updated}
+	}
 }
 
 // huntsLoadedMsg carries the result of loading hunts and their application counts.
