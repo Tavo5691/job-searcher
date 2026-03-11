@@ -27,7 +27,36 @@ const (
 	appInputRole                // 5 — text input: role/title
 	appInputJobDesc             // 6 — text input: job description
 	appDetail                   // 7 — detail view for a single application
+	stageList                   // 8 — list of stages for the current application
+	stageInputType              // 9 — stage type picker (j/k to select)
+	stageInputLabel             // 10 — label input (only when type=other)
+	stageInputNotes             // 11 — notes text input
+	insightView                 // 12 — LLM-generated insight view
 )
+
+// stageTypeLabels and stageTypeValues are parallel slices for the stage type picker.
+// Index into one gives the display label; same index into the other gives the domain value.
+var stageTypeLabels = []string{
+	"Recruiter Screen",
+	"Technical Screen",
+	"Take-Home Assignment",
+	"Technical Interview",
+	"Behavioral Interview",
+	"System Design",
+	"Offer",
+	"Other",
+}
+
+var stageTypeValues = []domain.StageType{
+	domain.StageTypeRecruiterScreen,
+	domain.StageTypeTechnicalScreen,
+	domain.StageTypeTakeHome,
+	domain.StageTypeTechnicalInterview,
+	domain.StageTypeBehavioral,
+	domain.StageTypeSystemDesign,
+	domain.StageTypeOffer,
+	domain.StageTypeOther,
+}
 
 // serviceIface is the minimal subset of app.Service that the TUI requires.
 // Defined here (at the consumer) per idiomatic Go.
@@ -39,6 +68,11 @@ type serviceIface interface {
 	ListApplications(ctx context.Context, huntID string) ([]domain.Application, error)
 	CreateApplication(ctx context.Context, huntID, company, role, jobDesc string) (domain.Application, error)
 	UpdateApplication(ctx context.Context, app domain.Application) (domain.Application, error)
+	ListStages(ctx context.Context, applicationID string) ([]domain.Stage, error)
+	AddStage(ctx context.Context, st domain.Stage) (domain.Stage, error)
+	DeleteStage(ctx context.Context, id string) error
+	GetInsight(ctx context.Context, applicationID string) (domain.Insight, error)
+	GenerateInsight(ctx context.Context, applicationID string) (domain.Insight, error)
 }
 
 // App is the root Bubble Tea model for the job-searcher TUI.
@@ -59,6 +93,14 @@ type App struct {
 	inputStep   int
 	draft       domain.Application
 	currentApp  domain.Application
+	// Stage flow fields.
+	stages       []domain.Stage
+	stageCursor  int
+	draftStage   domain.Stage
+	stageTypeIdx int
+	// Insight flow fields.
+	currentInsight domain.Insight
+	insightLoading bool
 }
 
 // NewApp creates a new App with the given service.
@@ -118,6 +160,64 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateAppInputJobDesc(m)
 		case appDetail:
 			return a.updateAppDetail(m)
+		case stageList:
+			return a.updateStageList(m)
+		case stageInputType:
+			return a.updateStageInputType(m)
+		case stageInputLabel:
+			return a.updateStageInputLabel(m)
+		case stageInputNotes:
+			return a.updateStageInputNotes(m)
+		case insightView:
+			return a.updateInsightView(m)
+		}
+	case stagesLoadedMsg:
+		if m.err != nil {
+			a.statusMsg = m.err.Error()
+		} else {
+			a.stages = m.stages
+			a.stageCursor = 0
+		}
+	case stageCreatedMsg:
+		if m.err != nil {
+			a.statusMsg = m.err.Error()
+		} else {
+			a.stages = append(a.stages, m.stage)
+			a.draftStage = domain.Stage{}
+			a.currentView = stageList
+		}
+	case stageDeletedMsg:
+		if m.err != nil {
+			a.statusMsg = m.err.Error()
+		} else {
+			filtered := make([]domain.Stage, 0, len(a.stages))
+			for _, s := range a.stages {
+				if s.ID != m.id {
+					filtered = append(filtered, s)
+				}
+			}
+			a.stages = filtered
+			if a.stageCursor >= len(a.stages) && a.stageCursor > 0 {
+				a.stageCursor = len(a.stages) - 1
+			}
+		}
+	case insightLoadedMsg:
+		if m.err != nil {
+			a.statusMsg = m.err.Error()
+			a.insightLoading = false
+		} else if m.insight.ID == "" {
+			// No insight yet — auto-trigger generation.
+			return a, generateInsightCmd(a.svc, a.currentApp.ID)
+		} else {
+			a.currentInsight = m.insight
+			a.insightLoading = false
+		}
+	case insightGeneratedMsg:
+		a.insightLoading = false
+		if m.err != nil {
+			a.statusMsg = m.err.Error()
+		} else {
+			a.currentInsight = m.insight
 		}
 	case huntsLoadedMsg:
 		a.hunts = m.hunts
@@ -341,6 +441,134 @@ func (a *App) updateAppDetail(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		a.currentApp.Status = nextStatus(a.currentApp.Status)
 		return a, updateApplicationCmd(a.svc, a.currentApp)
+	case "t":
+		a.stageCursor = 0
+		a.currentView = stageList
+		return a, loadStagesCmd(a.svc, a.currentApp.ID)
+	case "i":
+		if !a.insightLoading {
+			a.insightLoading = true
+			a.currentView = insightView
+			return a, getInsightCmd(a.svc, a.currentApp.ID)
+		}
+	}
+	return a, nil
+}
+
+// updateStageList handles key messages in the stage list view.
+func (a *App) updateStageList(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.currentView = appDetail
+		return a, nil
+	}
+	switch m.String() {
+	case "j", "down":
+		if a.stageCursor < len(a.stages)-1 {
+			a.stageCursor++
+		}
+	case "k", "up":
+		if a.stageCursor > 0 {
+			a.stageCursor--
+		}
+	case "n":
+		a.draftStage = domain.Stage{}
+		a.stageTypeIdx = 0
+		a.currentView = stageInputType
+	case "d":
+		if len(a.stages) > 0 && a.stageCursor < len(a.stages) {
+			id := a.stages[a.stageCursor].ID
+			return a, deleteStageCmd(a.svc, id)
+		}
+	}
+	return a, nil
+}
+
+// updateStageInputType handles key messages in the stage type picker view.
+func (a *App) updateStageInputType(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.currentView = stageList
+		return a, nil
+	case tea.KeyEnter:
+		a.draftStage.Type = stageTypeValues[a.stageTypeIdx]
+		if a.draftStage.Type == domain.StageTypeOther {
+			a.input.Reset()
+			a.input.Focus()
+			a.currentView = stageInputLabel
+			return a, textinput.Blink
+		}
+		a.input.Reset()
+		a.input.Focus()
+		a.currentView = stageInputNotes
+		return a, textinput.Blink
+	}
+	switch m.String() {
+	case "j", "down":
+		a.stageTypeIdx = (a.stageTypeIdx + 1) % len(stageTypeLabels)
+	case "k", "up":
+		a.stageTypeIdx = (a.stageTypeIdx + len(stageTypeLabels) - 1) % len(stageTypeLabels)
+	}
+	return a, nil
+}
+
+// updateStageInputLabel handles key messages in the stage label input view (type=other).
+func (a *App) updateStageInputLabel(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.input.Reset()
+		a.currentView = stageInputType
+		return a, nil
+	case tea.KeyEnter:
+		a.draftStage.Label = a.input.Value()
+		a.input.Reset()
+		a.input.Focus()
+		a.currentView = stageInputNotes
+		return a, textinput.Blink
+	default:
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(m)
+		return a, cmd
+	}
+}
+
+// updateStageInputNotes handles key messages in the stage notes input view.
+func (a *App) updateStageInputNotes(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.input.Reset()
+		if a.draftStage.Type == domain.StageTypeOther {
+			a.currentView = stageInputLabel
+		} else {
+			a.currentView = stageInputType
+		}
+		return a, nil
+	case tea.KeyEnter:
+		a.draftStage.Notes = a.input.Value()
+		a.draftStage.ApplicationID = a.currentApp.ID
+		a.draftStage.Order = len(a.stages)
+		a.input.Reset()
+		return a, addStageCmd(a.svc, a.draftStage)
+	default:
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(m)
+		return a, cmd
+	}
+}
+
+// updateInsightView handles key messages in the insight view.
+func (a *App) updateInsightView(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.Type {
+	case tea.KeyEsc:
+		a.currentView = appDetail
+		return a, nil
+	}
+	switch m.String() {
+	case "r":
+		if !a.insightLoading {
+			a.insightLoading = true
+			return a, generateInsightCmd(a.svc, a.currentApp.ID)
+		}
 	}
 	return a, nil
 }
@@ -397,6 +625,16 @@ func (a *App) View() string {
 		return a.viewAppInputJobDesc()
 	case appDetail:
 		return a.viewAppDetail()
+	case stageList:
+		return a.viewStageList()
+	case stageInputType:
+		return a.viewStageInputType()
+	case stageInputLabel:
+		return a.viewStageInput("Label (describe this stage)")
+	case stageInputNotes:
+		return a.viewStageInput("Notes")
+	case insightView:
+		return a.viewInsight()
 	default:
 		return a.viewHuntList()
 	}
@@ -439,7 +677,69 @@ func (a *App) viewAppDetail() string {
 	if len(desc) > 200 {
 		desc = desc[:200] + "..."
 	}
-	return fmt.Sprintf("%s\n\nStatus: %s\n\n%s\n\n[s] cycle status  [Esc] back", title, ap.Status, desc)
+	return fmt.Sprintf("%s\n\nStatus: %s\n\n%s\n\n[s] cycle status  [t] stages  [i] insight  [Esc] back", title, ap.Status, desc)
+}
+
+// viewStageList renders the stage list for the current application.
+func (a *App) viewStageList() string {
+	title := lipgloss.NewStyle().Bold(true).Render(a.currentApp.CompanyName + " — Stages")
+	if len(a.stages) == 0 {
+		return title + "\n\nNo stages yet. Press 'n' to add one.\n\nn to add • Esc to go back"
+	}
+	var sb strings.Builder
+	for i, st := range a.stages {
+		cursor := "  "
+		if i == a.stageCursor {
+			cursor = "> "
+		}
+		label := string(st.Type)
+		if st.Type == domain.StageTypeOther && st.Label != "" {
+			label = st.Label
+		}
+		notes := st.Notes
+		if len(notes) > 40 {
+			notes = notes[:40] + "…"
+		}
+		if notes != "" {
+			fmt.Fprintf(&sb, "%s%s — %s\n", cursor, label, notes)
+		} else {
+			fmt.Fprintf(&sb, "%s%s\n", cursor, label)
+		}
+	}
+	return title + "\n\n" + sb.String() + "\nj/k to move • n to add • d to delete • Esc to go back"
+}
+
+// viewStageInputType renders the stage type picker screen.
+func (a *App) viewStageInputType() string {
+	title := lipgloss.NewStyle().Bold(true).Render("New Stage — Select type")
+	var sb strings.Builder
+	for i, label := range stageTypeLabels {
+		if i == a.stageTypeIdx {
+			fmt.Fprintf(&sb, "> %s\n", label)
+		} else {
+			fmt.Fprintf(&sb, "  %s\n", label)
+		}
+	}
+	return title + "\n\n" + sb.String() + "\nj/k to move • Enter to select • Esc to cancel"
+}
+
+// viewStageInput renders a single-line text input for stage label or notes.
+func (a *App) viewStageInput(prompt string) string {
+	title := lipgloss.NewStyle().Bold(true).Render("New Stage — " + prompt)
+	return title + "\n\n" + a.input.View() + "\n\nEnter to continue • Esc to go back"
+}
+
+// viewInsight renders the insight view.
+func (a *App) viewInsight() string {
+	title := lipgloss.NewStyle().Bold(true).Render("Insight: " + a.currentApp.CompanyName + " \u2014 " + a.currentApp.RoleTitle)
+	if a.insightLoading {
+		return title + "\n\nGenerating insight…\n\nEsc to go back"
+	}
+	content := a.currentInsight.Content
+	if content == "" {
+		content = "(No insight available)"
+	}
+	return title + "\n\n" + content + "\n\n[r] regenerate  [Esc] back"
 }
 
 // viewHuntList renders the hunt list screen.
@@ -589,4 +889,91 @@ func closeHuntCmd(svc serviceIface, id string) tea.Cmd {
 		h, err := svc.CloseHunt(context.Background(), id)
 		return huntClosedMsg{hunt: h, err: err}
 	}
+}
+
+// stagesLoadedMsg carries the result of listing stages for an application.
+type stagesLoadedMsg struct {
+	stages []domain.Stage
+	err    error
+}
+
+// stageCreatedMsg carries the result of adding a stage.
+type stageCreatedMsg struct {
+	stage domain.Stage
+	err   error
+}
+
+// stageDeletedMsg carries the result of deleting a stage.
+type stageDeletedMsg struct {
+	id  string
+	err error
+}
+
+// insightLoadedMsg carries the result of getting an insight.
+// If insight.ID is empty and err is nil, no insight exists yet.
+type insightLoadedMsg struct {
+	insight domain.Insight
+	err     error
+}
+
+// insightGeneratedMsg carries the result of generating an insight.
+type insightGeneratedMsg struct {
+	insight domain.Insight
+	err     error
+}
+
+// loadStagesCmd returns a Bubble Tea command that lists stages for an application.
+func loadStagesCmd(svc serviceIface, applicationID string) tea.Cmd {
+	return func() tea.Msg {
+		stages, err := svc.ListStages(context.Background(), applicationID)
+		return stagesLoadedMsg{stages: stages, err: err}
+	}
+}
+
+// addStageCmd returns a Bubble Tea command that adds a stage.
+func addStageCmd(svc serviceIface, st domain.Stage) tea.Cmd {
+	return func() tea.Msg {
+		created, err := svc.AddStage(context.Background(), st)
+		return stageCreatedMsg{stage: created, err: err}
+	}
+}
+
+// deleteStageCmd returns a Bubble Tea command that deletes a stage by ID.
+func deleteStageCmd(svc serviceIface, id string) tea.Cmd {
+	return func() tea.Msg {
+		err := svc.DeleteStage(context.Background(), id)
+		return stageDeletedMsg{id: id, err: err}
+	}
+}
+
+// getInsightCmd returns a Bubble Tea command that fetches the insight for an application.
+// If no insight exists, the returned msg will have an empty insight.ID.
+func getInsightCmd(svc serviceIface, applicationID string) tea.Cmd {
+	return func() tea.Msg {
+		insight, err := svc.GetInsight(context.Background(), applicationID)
+		if err != nil {
+			// ErrNotFound is a normal condition — return empty insight with no error.
+			if isNotFound(err) {
+				return insightLoadedMsg{insight: domain.Insight{}}
+			}
+			return insightLoadedMsg{err: err}
+		}
+		return insightLoadedMsg{insight: insight}
+	}
+}
+
+// generateInsightCmd returns a Bubble Tea command that generates an insight via LLM.
+func generateInsightCmd(svc serviceIface, applicationID string) tea.Cmd {
+	return func() tea.Msg {
+		insight, err := svc.GenerateInsight(context.Background(), applicationID)
+		return insightGeneratedMsg{insight: insight, err: err}
+	}
+}
+
+// isNotFound reports whether err wraps domain.ErrNotFound.
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "not found")
 }
