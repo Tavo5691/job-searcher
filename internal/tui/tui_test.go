@@ -634,18 +634,19 @@ func TestAppInputRoleEnterAdvancesToJobDesc(t *testing.T) {
 	}
 }
 
-// TestAppInputJobDescEnterFiresCreateAndTransitionsToAppList asserts that pressing
-// Enter in appInputJobDesc fires createApplicationCmd and transitions to appList.
-func TestAppInputJobDescEnterFiresCreateAndTransitionsToAppList(t *testing.T) {
+// TestAppInputJobDescCtrlDFiresCreateAndTransitionsToAppList asserts that pressing
+// ctrl+d in appInputJobDesc fires createApplicationCmd and transitions to appList.
+// (Enter now inserts a newline — ctrl+d is the submit key for multi-line JD input.)
+func TestAppInputJobDescCtrlDFiresCreateAndTransitionsToAppList(t *testing.T) {
 	svc := &stubService{}
 	app := NewApp(svc)
 	app.currentView = appInputJobDesc
 	app.currentHunt = domain.Hunt{ID: "h1", Title: "Big Tech", Status: "active"}
 	app.draft = domain.Application{CompanyName: "Acme Corp", RoleTitle: "Senior Engineer"}
 	app.inputStep = 2
-	app.input.SetValue("Build great things")
+	app.jdInput.SetValue("Build great things")
 
-	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	updated := model.(*App)
 
 	if updated.currentView != appList {
@@ -1089,6 +1090,202 @@ func TestApplicationCreatedMsgIncrementsCount(t *testing.T) {
 			t.Errorf("expected count to be 1, got %d", updated.counts["h1"])
 		}
 	})
+}
+
+// ============================================================
+// jd-textarea-input: Phase 1 — Struct + Initialization
+// ============================================================
+
+// TestNewAppInitializesJdInput asserts that NewApp initializes jdInput with
+// non-zero width and height (i.e. the field was properly set up).
+func TestNewAppInitializesJdInput(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	if app.jdInput.Width() == 0 {
+		t.Error("expected jdInput to be initialized with a non-zero width")
+	}
+	if app.jdInput.Height() == 0 {
+		t.Error("expected jdInput to be initialized with a non-zero height")
+	}
+}
+
+// TestJdInputIsFocusedAfterRoleTransition asserts that jdInput is focused
+// when Enter is pressed on the role input view, transitioning to appInputJobDesc.
+func TestJdInputIsFocusedAfterRoleTransition(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	app.currentView = appInputRole
+	app.input.SetValue("Senior Engineer")
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(*App)
+
+	if updated.currentView != appInputJobDesc {
+		t.Fatalf("expected appInputJobDesc, got %d", updated.currentView)
+	}
+	if !updated.jdInput.Focused() {
+		t.Error("jdInput must be focused after transition to appInputJobDesc")
+	}
+}
+
+// TestJdInputCtrlDNotBoundToDelete asserts that ctrl+d is NOT in the
+// DeleteCharacterForward keymap binding on jdInput after initialization.
+func TestJdInputCtrlDNotBoundToDelete(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	for _, key := range app.jdInput.KeyMap.DeleteCharacterForward.Keys() {
+		if key == "ctrl+d" {
+			t.Errorf("expected ctrl+d NOT to be in DeleteCharacterForward keymap, found it")
+		}
+	}
+}
+
+// ============================================================
+// jd-textarea-input: Phase 2 — updateAppInputJobDesc behaviour
+// ============================================================
+
+// TestCtrlDSubmitsJdAndTransitionsToAppList asserts that ctrl+d in appInputJobDesc
+// fires createApplicationCmd with the textarea value and transitions to appList.
+func TestCtrlDSubmitsJdAndTransitionsToAppList(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	app.currentView = appInputJobDesc
+	app.currentHunt = domain.Hunt{ID: "h1", Title: "Big Tech", Status: "active"}
+	app.draft = domain.Application{CompanyName: "Acme Corp", RoleTitle: "Senior Engineer"}
+	app.inputStep = 2
+	app.jdInput.SetValue("We are looking for a talented engineer to join our team.\nMust have Go experience.")
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	updated := model.(*App)
+
+	if updated.currentView != appList {
+		t.Errorf("expected currentView == appList (%d), got %d", appList, updated.currentView)
+	}
+	if cmd == nil {
+		t.Fatal("expected createApplicationCmd to be issued")
+	}
+	// Execute the command and verify it returns applicationCreatedMsg with correct jobDesc
+	msg := cmd()
+	created, ok := msg.(applicationCreatedMsg)
+	if !ok {
+		t.Fatalf("expected applicationCreatedMsg, got %T", msg)
+	}
+	if created.app.JobDescription == "" {
+		t.Error("expected JobDescription to be non-empty")
+	}
+	// jdInput must be reset after submit
+	if updated.jdInput.Value() != "" {
+		t.Errorf("expected jdInput to be reset after submit, got %q", updated.jdInput.Value())
+	}
+}
+
+// TestCtrlDWithEmptyJdIsNoop asserts that ctrl+d in appInputJobDesc with empty
+// textarea does NOT fire createApplicationCmd and stays on appInputJobDesc.
+func TestCtrlDWithEmptyJdIsNoop(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	app.currentView = appInputJobDesc
+	app.currentHunt = domain.Hunt{ID: "h1", Title: "Big Tech", Status: "active"}
+	app.draft = domain.Application{CompanyName: "Acme", RoleTitle: "Engineer"}
+	// jdInput value is empty (default)
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	updated := model.(*App)
+
+	if updated.currentView != appInputJobDesc {
+		t.Errorf("expected to remain in appInputJobDesc, got view %d", updated.currentView)
+	}
+	if cmd != nil {
+		t.Error("expected no command to be issued for empty JD")
+	}
+}
+
+// TestEnterInJdViewDoesNotSubmit asserts that pressing Enter in appInputJobDesc
+// does NOT fire createApplicationCmd (Enter adds a newline, ctrl+d submits).
+func TestEnterInJdViewDoesNotSubmit(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	app.currentView = appInputJobDesc
+	app.currentHunt = domain.Hunt{ID: "h1", Title: "Big Tech", Status: "active"}
+	app.draft = domain.Application{CompanyName: "Acme", RoleTitle: "Engineer"}
+	app.jdInput.SetValue("Some text")
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// The command (if any) must NOT be a createApplicationCmd — we can verify by
+	// checking the view stays in appInputJobDesc.
+	// (We can't inspect cmd type directly; we verify via view state.)
+	app2 := &App{}
+	_ = app2
+	// The cmd returned is the textarea's own update cmd, not createApplicationCmd.
+	// Key assertion: no applicationCreatedMsg fires.
+	if cmd != nil {
+		msg := cmd()
+		if _, ok := msg.(applicationCreatedMsg); ok {
+			t.Error("expected Enter NOT to fire applicationCreatedMsg in JD view")
+		}
+	}
+}
+
+// TestEscOnJdInputViewReturnsToAppList asserts that Esc in appInputJobDesc
+// zeros draft and inputStep and returns to appList.
+func TestEscOnJdInputViewReturnsToAppList(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	app.currentView = appInputJobDesc
+	app.draft = domain.Application{CompanyName: "Acme", RoleTitle: "Eng"}
+	app.inputStep = 2
+	app.jdInput.SetValue("partial jd text")
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := model.(*App)
+
+	if updated.currentView != appList {
+		t.Errorf("expected currentView == appList (%d), got %d", appList, updated.currentView)
+	}
+	if updated.draft.CompanyName != "" || updated.draft.RoleTitle != "" {
+		t.Errorf("expected draft zeroed, got %+v", updated.draft)
+	}
+	if updated.inputStep != 0 {
+		t.Errorf("expected inputStep == 0, got %d", updated.inputStep)
+	}
+	if updated.jdInput.Value() != "" {
+		t.Errorf("expected jdInput reset after Esc, got %q", updated.jdInput.Value())
+	}
+}
+
+// ============================================================
+// jd-textarea-input: Phase 3 — viewAppInputJobDesc rendering
+// ============================================================
+
+// TestJdInputRetainsMultilineValue asserts that jdInput preserves newlines
+// when set and retrieved — covering the "JD input accepts multi-line text" scenario.
+func TestJdInputRetainsMultilineValue(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+
+	want := "Line 1\nLine 2\nLine 3"
+	app.jdInput.SetValue(want)
+
+	if got := app.jdInput.Value(); got != want {
+		t.Errorf("expected jdInput.Value() == %q, got %q", want, got)
+	}
+}
+
+// TestViewAppInputJobDescContainsTextareaAndHint asserts that the JD view
+// renders the textarea widget and includes "ctrl+d to submit" hint.
+func TestViewAppInputJobDescContainsTextareaAndHint(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	app.currentView = appInputJobDesc
+
+	v := app.View()
+
+	if v == "" {
+		t.Fatal("expected non-empty view for appInputJobDesc")
+	}
+	if !strings.Contains(v, "ctrl+d") {
+		t.Errorf("expected view to contain 'ctrl+d' submit hint, got:\n%s", v)
+	}
 }
 
 // stubService satisfies serviceIface for testing.

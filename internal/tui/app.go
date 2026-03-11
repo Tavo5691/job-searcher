@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -48,6 +49,7 @@ type App struct {
 	err         error
 	currentView view
 	input       textinput.Model
+	jdInput     textarea.Model
 	counts      map[string]int
 	statusMsg   string
 	// Application flow fields.
@@ -64,9 +66,19 @@ func NewApp(svc serviceIface) *App {
 	ti := textinput.New()
 	ti.Placeholder = "Hunt name…"
 	ti.CharLimit = 100
+
+	ta := textarea.New()
+	ta.Placeholder = "Paste or type the job description…"
+	ta.SetWidth(60)
+	ta.SetHeight(8)
+	// Unbind DeleteCharacterForward (ctrl+d) so we can intercept it as the
+	// submit key. Without this, ctrl+d would be consumed by the textarea itself.
+	ta.KeyMap.DeleteCharacterForward.Unbind()
+
 	return &App{
-		svc:   svc,
-		input: ti,
+		svc:     svc,
+		input:   ti,
+		jdInput: ta,
 	}
 }
 
@@ -273,7 +285,9 @@ func (a *App) updateAppInputRole(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.input.Reset()
 		a.inputStep = 2
 		a.currentView = appInputJobDesc
-		return a, nil
+		a.jdInput.Reset()
+		cmd := a.jdInput.Focus()
+		return a, cmd
 	case tea.KeyEsc:
 		a.draft = domain.Application{}
 		a.inputStep = 0
@@ -288,22 +302,30 @@ func (a *App) updateAppInputRole(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateAppInputJobDesc handles key messages in the job description input view.
+// ctrl+d is the submit key; Enter inserts a newline (multi-line textarea).
 func (a *App) updateAppInputJobDesc(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.Type {
-	case tea.KeyEnter:
-		jobDesc := a.input.Value()
-		a.input.Reset()
+	case tea.KeyCtrlD:
+		jobDesc := strings.TrimSpace(a.jdInput.Value())
+		if jobDesc == "" {
+			return a, nil
+		}
+		company := a.draft.CompanyName
+		role := a.draft.RoleTitle
+		a.jdInput.Reset()
+		a.draft = domain.Application{}
+		a.inputStep = 0
 		a.currentView = appList
-		return a, createApplicationCmd(a.svc, a.currentHunt.ID, a.draft.CompanyName, a.draft.RoleTitle, jobDesc)
+		return a, createApplicationCmd(a.svc, a.currentHunt.ID, company, role, jobDesc)
 	case tea.KeyEsc:
 		a.draft = domain.Application{}
 		a.inputStep = 0
-		a.input.Reset()
+		a.jdInput.Reset()
 		a.currentView = appList
 		return a, nil
 	default:
 		var cmd tea.Cmd
-		a.input, cmd = a.input.Update(m)
+		a.jdInput, cmd = a.jdInput.Update(m)
 		return a, cmd
 	}
 }
@@ -372,7 +394,7 @@ func (a *App) View() string {
 	case appInputRole:
 		return a.viewAppInput("Role / job title")
 	case appInputJobDesc:
-		return a.viewAppInput("Job description")
+		return a.viewAppInputJobDesc()
 	case appDetail:
 		return a.viewAppDetail()
 	default:
@@ -401,6 +423,12 @@ func (a *App) viewAppList() string {
 func (a *App) viewAppInput(prompt string) string {
 	title := lipgloss.NewStyle().Bold(true).Render("New Application — " + prompt)
 	return title + "\n\n" + a.input.View() + "\n\nEnter to continue • Esc to cancel"
+}
+
+// viewAppInputJobDesc renders the multi-line job description input screen.
+func (a *App) viewAppInputJobDesc() string {
+	title := lipgloss.NewStyle().Bold(true).Render("New Application — Job description")
+	return title + "\n\n" + a.jdInput.View() + "\n\nctrl+d to submit • Esc to cancel"
 }
 
 // viewAppDetail renders the application detail screen.
