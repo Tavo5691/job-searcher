@@ -999,6 +999,98 @@ func TestViewRoutingNewConstants(t *testing.T) {
 	}
 }
 
+// TestEnterOnHuntListSetsCurrentHunt asserts that pressing Enter in huntList
+// captures the selected hunt into currentHunt before transitioning to huntDetail.
+func TestEnterOnHuntListSetsCurrentHunt(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	h := domain.Hunt{ID: "h1", Title: "Big Tech Hunt", Status: "active"}
+	app.hunts = []domain.Hunt{h}
+	app.cursor = 0
+
+	model, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := model.(*App)
+
+	if updated.currentView != huntDetail {
+		t.Fatalf("expected huntDetail view, got %d", updated.currentView)
+	}
+	if updated.currentHunt.ID != h.ID {
+		t.Errorf("expected currentHunt.ID == %q, got %q", h.ID, updated.currentHunt.ID)
+	}
+	if updated.currentHunt.Title != h.Title {
+		t.Errorf("expected currentHunt.Title == %q, got %q", h.Title, updated.currentHunt.Title)
+	}
+}
+
+// TestViewHuntDetailUsesCurrentHunt asserts that viewHuntDetail renders from
+// currentHunt (not the hunt list cursor), and includes the Enter hint.
+func TestViewHuntDetailUsesCurrentHunt(t *testing.T) {
+	svc := &stubService{}
+	app := NewApp(svc)
+	// Two hunts: cursor points at index 0, but currentHunt is index 1.
+	app.hunts = []domain.Hunt{
+		{ID: "h1", Title: "First Hunt", Status: "active"},
+		{ID: "h2", Title: "Second Hunt", Status: "active"},
+	}
+	app.cursor = 0
+	app.currentHunt = domain.Hunt{ID: "h2", Title: "Second Hunt", Status: "active"}
+	app.counts = map[string]int{"h2": 5}
+	app.currentView = huntDetail
+
+	v := app.View()
+
+	if !strings.Contains(v, "Second Hunt") {
+		t.Errorf("expected view to show currentHunt 'Second Hunt', got:\n%s", v)
+	}
+	if strings.Contains(v, "First Hunt") {
+		t.Errorf("expected view NOT to show cursor hunt 'First Hunt', got:\n%s", v)
+	}
+	if !strings.Contains(v, "5") {
+		t.Errorf("expected view to show application count 5, got:\n%s", v)
+	}
+	if !strings.Contains(v, "Enter") {
+		t.Errorf("expected view to contain 'Enter' hint, got:\n%s", v)
+	}
+}
+
+// TestApplicationCreatedMsgIncrementsCount asserts that receiving an
+// applicationCreatedMsg increments the count for the currentHunt in the
+// counts map — keeping the hunt list and hunt detail counts in sync.
+func TestApplicationCreatedMsgIncrementsCount(t *testing.T) {
+	t.Run("increments existing count", func(t *testing.T) {
+		svc := &stubService{}
+		app := NewApp(svc)
+		app.currentHunt = domain.Hunt{ID: "h1", Title: "My Hunt", Status: "active"}
+		app.counts = map[string]int{"h1": 2}
+
+		newApp := domain.Application{ID: "app-1", HuntID: "h1", CompanyName: "Acme", RoleTitle: "Eng", Status: domain.ApplicationStatusApplied}
+		model, _ := app.Update(applicationCreatedMsg{app: newApp})
+		updated := model.(*App)
+
+		if updated.counts["h1"] != 3 {
+			t.Errorf("expected count to be 3, got %d", updated.counts["h1"])
+		}
+	})
+
+	t.Run("initialises nil counts map", func(t *testing.T) {
+		svc := &stubService{}
+		app := NewApp(svc)
+		app.currentHunt = domain.Hunt{ID: "h1", Title: "My Hunt", Status: "active"}
+		// counts is nil — simulates first app created before a reload
+
+		newApp := domain.Application{ID: "app-1", HuntID: "h1", CompanyName: "Acme", RoleTitle: "Eng", Status: domain.ApplicationStatusApplied}
+		model, _ := app.Update(applicationCreatedMsg{app: newApp})
+		updated := model.(*App)
+
+		if updated.counts == nil {
+			t.Fatal("expected counts map to be initialised")
+		}
+		if updated.counts["h1"] != 1 {
+			t.Errorf("expected count to be 1, got %d", updated.counts["h1"])
+		}
+	})
+}
+
 // stubService satisfies serviceIface for testing.
 type stubService struct {
 	createHuntCalled bool

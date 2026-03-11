@@ -131,6 +131,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.apps = append(a.apps, m.app)
 		a.draft = domain.Application{}
 		a.inputStep = 0
+		if a.counts == nil {
+			a.counts = make(map[string]int)
+		}
+		a.counts[a.currentHunt.ID]++
 	case applicationUpdatedMsg:
 		// Refresh the apps list with the updated application.
 		for i, ap := range a.apps {
@@ -170,6 +174,7 @@ func (a *App) updateHuntList(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, textinput.Blink
 	case "enter":
 		if len(a.hunts) > 0 {
+			a.currentHunt = a.hunts[a.cursor]
 			a.currentView = huntDetail
 		}
 	case "c":
@@ -446,16 +451,16 @@ func (a *App) viewHuntInput() string {
 
 // viewHuntDetail renders the hunt detail screen.
 func (a *App) viewHuntDetail() string {
-	if len(a.hunts) == 0 || a.cursor >= len(a.hunts) {
+	h := a.currentHunt
+	if h.ID == "" {
 		return "No hunt selected.\n\nEsc to go back"
 	}
-	h := a.hunts[a.cursor]
 	n := 0
 	if a.counts != nil {
 		n = a.counts[h.ID]
 	}
 	title := lipgloss.NewStyle().Bold(true).Render(h.Title)
-	return fmt.Sprintf("%s\n\nStatus: %s\nApplications: %d\n\nEsc to go back", title, h.Status, n)
+	return fmt.Sprintf("%s\n\nStatus: %s\nApplications: %d\n\nEnter to open applications • Esc to go back", title, h.Status, n)
 }
 
 // statusMsg is a tea.Msg that carries an error or status string for display.
