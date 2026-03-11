@@ -82,8 +82,7 @@ func stripPDFOperators(data []byte) []byte {
 	var out bytes.Buffer
 	// Simple heuristic: extract parenthesised strings (PDF text objects).
 	inStr := false
-	for i := 0; i < len(data); i++ {
-		b := data[i]
+	for _, b := range data {
 		if b == '(' && !inStr {
 			inStr = true
 			continue

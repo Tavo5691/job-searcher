@@ -386,15 +386,15 @@ func (a *App) viewAppList() string {
 	if len(a.apps) == 0 {
 		return title + "\n\nNo applications yet. Press 'n' to create one.\n\nEsc to go back • n to create"
 	}
-	var rows string
+	var sb strings.Builder
 	for i, ap := range a.apps {
 		cursor := "  "
 		if i == a.appCursor {
 			cursor = "> "
 		}
-		rows += fmt.Sprintf("%s%s — %s [%s]\n", cursor, ap.CompanyName, ap.RoleTitle, ap.Status)
+		fmt.Fprintf(&sb, "%s%s — %s [%s]\n", cursor, ap.CompanyName, ap.RoleTitle, ap.Status)
 	}
-	return title + "\n\n" + rows + "\nj/k to move • Enter to open • n to create • Esc to go back"
+	return title + "\n\n" + sb.String() + "\nj/k to move • Enter to open • n to create • Esc to go back"
 }
 
 // viewAppInput renders a single-line text input screen with the given prompt label.
@@ -428,19 +428,19 @@ func (a *App) viewHuntList() string {
 		return title + "\n\nNo hunts yet. Press n to create one.\n\nj/k to move • n to create • q to quit" + status
 	}
 
-	var rows string
+	var sb strings.Builder
 	for i, h := range a.hunts {
 		n := 0
 		if a.counts != nil {
 			n = a.counts[h.ID]
 		}
 		if i == a.cursor {
-			rows += fmt.Sprintf("  > %s (%s) \u2014 %d applications\n", h.Title, h.Status, n)
+			fmt.Fprintf(&sb, "  > %s (%s) \u2014 %d applications\n", h.Title, h.Status, n)
 		} else {
-			rows += fmt.Sprintf("    %s (%s) \u2014 %d applications\n", h.Title, h.Status, n)
+			fmt.Fprintf(&sb, "    %s (%s) \u2014 %d applications\n", h.Title, h.Status, n)
 		}
 	}
-	return title + "\n\n" + rows + "\nj/k to move • Enter to open • n to create • c to close • q to quit" + status
+	return title + "\n\n" + sb.String() + "\nj/k to move • Enter to open • n to create • c to close • q to quit" + status
 }
 
 // viewHuntInput renders the hunt name input screen.
